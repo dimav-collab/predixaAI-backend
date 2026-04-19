@@ -88,6 +88,28 @@ func (r *Repository) SetRuleEnabled(ctx context.Context, id string, enabled bool
 	return err
 }
 
+// UpsertStepperRuleToRules inserts or updates a row in the `rules` table using the same UUID
+// as the ui_rules record. This allows the scheduler to pick up stepper rules.
+func (r *Repository) UpsertStepperRuleToRules(ctx context.Context, rec RuleRecord) error {
+	_, err := r.Store.Pool.Exec(ctx, `
+		INSERT INTO rules (id, name, description, connection_ref, parameter_name, rule_json, enabled, status, last_error, last_validated_at, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),now())
+		ON CONFLICT (id) DO UPDATE
+		  SET name=$2, description=$3, connection_ref=$4, parameter_name=$5,
+		      rule_json=$6, enabled=$7, status=$8, last_error=$9, last_validated_at=$10,
+		      updated_at=now()`,
+		rec.ID, rec.Name, rec.Description, rec.ConnectionRef, rec.ParameterName,
+		rec.RuleJSON, rec.Enabled, rec.Status, rec.LastError, rec.LastValidatedAt,
+	)
+	return err
+}
+
+// DeleteRule removes a rule from the `rules` table by ID.
+func (r *Repository) DeleteRule(ctx context.Context, id string) error {
+	_, err := r.Store.Pool.Exec(ctx, `DELETE FROM rules WHERE id=$1`, id)
+	return err
+}
+
 func (r *Repository) ListAlerts(ctx context.Context, ruleID string) ([]AlertRecord, error) {
 	rows, err := r.Store.Pool.Query(ctx, `
 		SELECT id, rule_id, ts_utc, parameter_name, observed_value, limit_expression, detector_type, severity, anomaly_score, baseline_median, baseline_mad, hit, treated, metadata

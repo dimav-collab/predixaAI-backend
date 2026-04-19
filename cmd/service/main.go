@@ -28,6 +28,7 @@ func main() {
 	mux.HandleFunc("/describe", h.HandleDescribeTable)
 	mux.HandleFunc("/sample", h.HandleSampleRows)
 	mux.HandleFunc("/profile", h.HandleProfileTable)
+	mux.HandleFunc("/simulate/write", h.HandleSimulateWrite)
 
 	server := &http.Server{
 		Addr:              ":" + port,

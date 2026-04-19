@@ -45,6 +45,11 @@ func main() {
 		os.Exit(1)
 	}
 	defer store.Close()
+	if err := store.RunMigrations(ctx); err != nil {
+		logger.Error("failed to run migrations", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	logger.Info("migrations applied")
 	repo := storage.NewRepository(store)
 	publisher, err := bus.NewPublisher(natsURL)
 	if err != nil {

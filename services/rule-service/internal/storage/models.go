@@ -75,3 +75,33 @@ type StepperRule struct {
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }
+
+// SimulationStatus values.
+const (
+	SimStatusRunning = "running"
+	SimStatusStopped = "stopped"
+	SimStatusError   = "error"
+)
+
+// SimulationMode controls which kind of data the generator produces.
+const (
+	SimModeNormal     = "normal"      // values near the process mean — no violation expected
+	SimModeViolation  = "violation"   // values that immediately breach spec/control limits
+	SimModeTrendUp    = "trend_up"    // steadily increasing values — triggers TREND_6_POINTS / TPA
+	SimModeTrendDown  = "trend_down"  // steadily decreasing values
+	SimModeSpike      = "spike"       // random spikes — useful for range chart tests
+)
+
+// SimulationJob represents one active or stopped simulation run attached to a rule.
+type SimulationJob struct {
+	ID              string
+	RuleID          string
+	Status          string          // SimStatus*
+	Mode            string          // SimMode*
+	IntervalSeconds int             // how often a new row is inserted
+	InsertedCount   int             // cumulative rows inserted so far
+	LastError       string          // last error message if status=error
+	Config          json.RawMessage // extra per-mode config (e.g. baseValue, step, usl, lsl)
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}

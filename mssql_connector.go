@@ -264,3 +264,49 @@ func quoteMSSQLTable(table string) (string, error) {
 	}
 	return quoted, nil
 }
+
+func (c *MSSQLConnector) WriteRow(ctx context.Context, table, valueColumn, timestampColumn string, value any, extraColumns map[string]any) (int64, error) {
+	quotedTable, err := quoteMSSQLTable(table)
+	if err != nil {
+		return 0, err
+	}
+	quotedVal, err := quoteList([]string{valueColumn}, func(s string) string { return "[" + s + "]" })
+	if err != nil {
+		return 0, fmt.Errorf("invalid mssql value column: %w", err)
+	}
+	quotedTs, err := quoteList([]string{timestampColumn}, func(s string) string { return "[" + s + "]" })
+	if err != nil {
+		return 0, fmt.Errorf("invalid mssql timestamp column: %w", err)
+	}
+
+	colParts := []string{quotedVal, quotedTs}
+	placeholders := []string{"@p1", "GETDATE()"}
+	args := []any{value}
+	idx := 2
+
+	for k, v := range extraColumns {
+		qk, qErr := quoteList([]string{k}, func(s string) string { return "[" + s + "]" })
+		if qErr != nil {
+			return 0, fmt.Errorf("invalid extra column %q: %w", k, qErr)
+		}
+		colParts = append(colParts, qk)
+		placeholders = append(placeholders, fmt.Sprintf("@p%d", idx))
+		args = append(args, v)
+		idx++
+	}
+
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+		quotedTable,
+		strings.Join(colParts, ", "),
+		strings.Join(placeholders, ", "),
+	)
+	result, err := c.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("mssql write row: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("mssql rows affected: %w", err)
+	}
+	return n, nil
+}

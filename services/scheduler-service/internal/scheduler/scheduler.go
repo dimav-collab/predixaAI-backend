@@ -28,10 +28,12 @@ type Registry struct {
 }
 
 type Job struct {
-	ruleID  string
-	spec    RuleSpec
-	adapter mcp.DbMcpAdapter
-	stop    chan struct{}
+	ruleID    string
+	spec      RuleSpec
+	adapter   mcp.DbMcpAdapter
+	stop      chan struct{}
+	lastRunMu sync.Mutex
+	lastRunAt *time.Time // in-memory cache; persisted to DB after each run
 }
 
 type JobInfo struct {
@@ -41,6 +43,7 @@ type JobInfo struct {
 
 type JobRun struct {
 	ruleID  string
+	job     *Job
 	spec    RuleSpec
 	adapter mcp.DbMcpAdapter
 }
@@ -80,6 +83,11 @@ func (r *Registry) Schedule(ruleID string, spec RuleSpec, adapter mcp.DbMcpAdapt
 		close(existing.stop)
 	}
 	job := &Job{ruleID: ruleID, spec: spec, adapter: adapter, stop: make(chan struct{})}
+	// Load persisted last_run_at from DB so we do not re-evaluate old data on restart
+	if dbRec, err := r.repo.GetRule(context.Background(), ruleID); err == nil && dbRec.LastRunAt != nil {
+		t := *dbRec.LastRunAt
+		job.lastRunAt = &t
+	}
 	r.jobs[ruleID] = job
 	go r.runTicker(job)
 }
@@ -109,7 +117,7 @@ func (r *Registry) runTicker(job *Job) {
 	for {
 		select {
 		case <-ticker.C:
-			r.queue <- JobRun{ruleID: job.ruleID, spec: job.spec, adapter: job.adapter}
+			r.queue <- JobRun{ruleID: job.ruleID, job: job, spec: job.spec, adapter: job.adapter}
 		case <-job.stop:
 			return
 		case <-r.ctx.Done():
@@ -129,80 +137,132 @@ func (r *Registry) worker() {
 	}
 }
 
+// getLastRunAt returns the last run time for a job, guarded by its mutex.
+func (r *Registry) getLastRunAt(job *Job) *time.Time {
+	job.lastRunMu.Lock()
+	defer job.lastRunMu.Unlock()
+	if job.lastRunAt == nil {
+		return nil
+	}
+	t := *job.lastRunAt
+	return &t
+}
+
+// setLastRunAt updates the in-memory and persisted last run timestamp.
+func (r *Registry) setLastRunAt(ctx context.Context, job *Job, ts time.Time) {
+	job.lastRunMu.Lock()
+	job.lastRunAt = &ts
+	job.lastRunMu.Unlock()
+	_ = r.repo.UpdateLastRunAt(ctx, job.ruleID, ts)
+}
+
+// windowSince returns the start of the evaluation window.
+//   - When lastRunAt is known (subsequent runs): use that timestamp so only new rows are evaluated.
+//   - On the first run (lastRunAt is nil): fall back to now - pollIntervalSeconds so the
+//     window exactly matches one schedule period and we do not flood with historical alerts.
+func windowSince(spec RuleSpec, lastRunAt *time.Time) time.Time {
+	if lastRunAt != nil {
+		return *lastRunAt
+	}
+	interval := spec.PollIntervalSeconds
+	if interval <= 0 {
+		interval = 60
+	}
+	return time.Now().UTC().Add(-time.Duration(interval) * time.Second)
+}
+
 func (r *Registry) execute(run JobRun) {
 	ctx, cancel := context.WithTimeout(context.Background(), r.jobTimeout)
 	defer cancel()
+
+	runAt := time.Now().UTC()
 	params := normalizeParameters(run.spec)
 	if len(params) == 0 {
 		return
 	}
+
+	lastRunAt := r.getLastRunAt(run.job)
+
 	for _, param := range params {
-		result, err := r.evaluateParameter(ctx, run.spec, param, run.adapter)
-		if err != nil || !result.Hit {
+		results, err := r.evaluateParameterSince(ctx, run.spec, param, run.adapter, lastRunAt)
+		if err != nil {
 			continue
 		}
-		cooldown := 0
-		if run.spec.CooldownSeconds != nil {
-			cooldown = *run.spec.CooldownSeconds
-		}
-		if cooldown > 0 {
-			lastAlert, err := r.repo.GetLastAlertForKey(ctx, run.ruleID, param.ParameterName, param.Detector.Type)
-			if err == nil && monitor.WithinCooldown(lastAlert, cooldown) {
+		for _, result := range results {
+			if !result.Hit {
 				continue
 			}
+			cooldown := 0
+			if run.spec.CooldownSeconds != nil {
+				cooldown = *run.spec.CooldownSeconds
+			}
+			if cooldown > 0 {
+				lastAlert, err := r.repo.GetLastAlertForKey(ctx, run.ruleID, param.ParameterName, param.Detector.Type)
+				if err == nil && monitor.WithinCooldown(lastAlert, cooldown) {
+					continue
+				}
+			}
+			metadataMap := map[string]any{
+				"table":           run.spec.Source.Table,
+				"valueColumn":     param.ValueColumn,
+				"timestampColumn": run.spec.Source.TimestampColumn,
+				"detector":        param.Detector.Type,
+			}
+			for k, v := range result.Metadata {
+				metadataMap[k] = v
+			}
+			if result.WindowStart != nil {
+				metadataMap["windowStart"] = result.WindowStart.Format(time.RFC3339)
+			}
+			if result.WindowEnd != nil {
+				metadataMap["windowEnd"] = result.WindowEnd.Format(time.RFC3339)
+			}
+			if result.BaselineStart != nil {
+				metadataMap["baselineStart"] = result.BaselineStart.Format(time.RFC3339)
+			}
+			if result.BaselineEnd != nil {
+				metadataMap["baselineEnd"] = result.BaselineEnd.Format(time.RFC3339)
+			}
+			if len(result.Violations) > 0 {
+				metadataMap["violations"] = result.Violations
+			}
+			metadataMap["explain"] = buildExplain(result, param)
+			metadata, _ := json.Marshal(metadataMap)
+			_ = r.repo.CreateAlert(ctx, storage.AlertRecord{
+				RuleID:         run.ruleID,
+				TSUTC:          time.Now().UTC(),
+				ParameterName:  param.ParameterName,
+				ObservedValue:  result.Observed,
+				LimitExpr:      result.LimitExpr,
+				DetectorType:   param.Detector.Type,
+				Severity:       result.Severity,
+				AnomalyScore:   result.AnomalyScore,
+				BaselineMedian: result.BaselineMedian,
+				BaselineMAD:    result.BaselineMAD,
+				Hit:            true,
+				Treated:        false,
+				Metadata:       metadata,
+			})
 		}
-		metadataMap := map[string]any{
-			"table":           run.spec.Source.Table,
-			"valueColumn":     param.ValueColumn,
-			"timestampColumn": run.spec.Source.TimestampColumn,
-			"detector":        param.Detector.Type,
-		}
-		for k, v := range result.Metadata {
-			metadataMap[k] = v
-		}
-		if result.WindowStart != nil {
-			metadataMap["windowStart"] = result.WindowStart.Format(time.RFC3339)
-		}
-		if result.WindowEnd != nil {
-			metadataMap["windowEnd"] = result.WindowEnd.Format(time.RFC3339)
-		}
-		if result.BaselineStart != nil {
-			metadataMap["baselineStart"] = result.BaselineStart.Format(time.RFC3339)
-		}
-		if result.BaselineEnd != nil {
-			metadataMap["baselineEnd"] = result.BaselineEnd.Format(time.RFC3339)
-		}
-		if len(result.Violations) > 0 {
-			metadataMap["violations"] = result.Violations
-		}
-		metadataMap["explain"] = buildExplain(result, param)
-		metadata, _ := json.Marshal(metadataMap)
-		_ = r.repo.CreateAlert(ctx, storage.AlertRecord{
-			RuleID:         run.ruleID,
-			TSUTC:          time.Now().UTC(),
-			ParameterName:  param.ParameterName,
-			ObservedValue:  result.Observed,
-			LimitExpr:      result.LimitExpr,
-			DetectorType:   param.Detector.Type,
-			Severity:       result.Severity,
-			AnomalyScore:   result.AnomalyScore,
-			BaselineMedian: result.BaselineMedian,
-			BaselineMAD:    result.BaselineMAD,
-			Hit:            true,
-			Treated:        false,
-			Metadata:       metadata,
-		})
 	}
+
+	// Advance the window: next run will only see rows newer than this run started.
+	r.setLastRunAt(ctx, run.job, runAt)
 }
 
-func (r *Registry) evaluateParameter(ctx context.Context, spec RuleSpec, param ParameterSpec, adapter mcp.DbMcpAdapter) (DetectorResult, error) {
+// evaluateParameterSince evaluates a parameter for all new rows in the current poll window.
+// The window is [windowSince(spec, lastRunAt), now].
+// For spec_limit it returns one DetectorResult per violating row.
+// For all other detectors it returns a single result (unchanged behaviour).
+func (r *Registry) evaluateParameterSince(ctx context.Context, spec RuleSpec, param ParameterSpec, adapter mcp.DbMcpAdapter, lastRunAt *time.Time) ([]DetectorResult, error) {
 	if adapter == nil {
-		return DetectorResult{}, errors.New("adapter not configured")
+		return nil, errors.New("adapter not configured")
 	}
+
 	switch param.Detector.Type {
 	case "missing_data":
 		if param.Detector.MissingData == nil {
-			return DetectorResult{}, errors.New("missing_data detector missing config")
+			return nil, errors.New("missing_data detector missing config")
 		}
 		queryCtx, cancel := context.WithTimeout(ctx, r.limits.MaxQueryDuration)
 		defer cancel()
@@ -215,21 +275,22 @@ func (r *Registry) evaluateParameter(ctx context.Context, spec RuleSpec, param P
 		})
 		if err != nil {
 			if strings.Contains(err.Error(), "no rows") {
-				return EvaluateMissingData(time.Time{}, param.Detector.MissingData.MaxGapSeconds, time.Now().UTC()), nil
+				return []DetectorResult{EvaluateMissingData(time.Time{}, param.Detector.MissingData.MaxGapSeconds, time.Now().UTC())}, nil
 			}
-			return DetectorResult{}, err
+			return nil, err
 		}
 		timestamp, err := parseTimeValue(resp.Value)
 		if err != nil {
 			timestamp, err = parseTimeValue(resp.TS)
 			if err != nil {
-				return DetectorResult{}, err
+				return nil, err
 			}
 		}
-		return EvaluateMissingData(timestamp, param.Detector.MissingData.MaxGapSeconds, time.Now().UTC()), nil
+		return []DetectorResult{EvaluateMissingData(timestamp, param.Detector.MissingData.MaxGapSeconds, time.Now().UTC())}, nil
+
 	case "robust_zscore":
 		if param.Detector.RobustZ == nil {
-			return DetectorResult{}, errors.New("robust_zscore detector missing config")
+			return nil, errors.New("robust_zscore detector missing config")
 		}
 		baseline := param.Detector.RobustZ.BaselineWindowSeconds
 		since := time.Now().Add(-time.Duration(baseline) * time.Second).UTC().Format(time.RFC3339)
@@ -245,10 +306,10 @@ func (r *Registry) evaluateParameter(ctx context.Context, spec RuleSpec, param P
 			Limit:           r.limits.MaxSampleRows,
 		})
 		if err != nil {
-			return DetectorResult{}, err
+			return nil, err
 		}
 		if len(rows.Rows) < param.Detector.RobustZ.MinSamples {
-			return DetectorResult{Hit: false}, nil
+			return []DetectorResult{{Hit: false}}, nil
 		}
 		samples := make([]float64, 0, len(rows.Rows))
 		latest := 0.0
@@ -267,51 +328,53 @@ func (r *Registry) evaluateParameter(ctx context.Context, spec RuleSpec, param P
 			samples = append(samples, floatVal)
 		}
 		if len(samples) < param.Detector.RobustZ.MinSamples {
-			return DetectorResult{Hit: false}, nil
+			return []DetectorResult{{Hit: false}}, nil
 		}
 		result := EvaluateRobustZ(samples, latest, param.Detector.RobustZ.ZWarn, param.Detector.RobustZ.ZCrit)
-		return result, nil
+		return []DetectorResult{result}, nil
+
 	case "spec_limit":
 		if param.Detector.SpecLimit == nil {
-			return DetectorResult{}, errors.New("spec_limit detector missing config")
+			return nil, errors.New("spec_limit detector missing config")
 		}
+		// Window = [lastRunAt, now], falling back to one poll interval on first run.
+		since := windowSince(spec, lastRunAt)
 		queryCtx, cancel := context.WithTimeout(ctx, r.limits.MaxQueryDuration)
 		defer cancel()
-		resp, err := adapter.QueryLatestValue(queryCtx, mcp.LatestValueRequest{
-			ConnectionRef:   spec.ConnectionRef,
-			Table:           spec.Source.Table,
-			ValueColumn:     param.ValueColumn,
-			TimestampColumn: spec.Source.TimestampColumn,
-			Where:           toWhere(spec.Source.Where),
-		})
+		samples, err := fetchSamples(queryCtx, adapter, spec, param, nil, since, r.limits.MaxSampleRows, "")
 		if err != nil {
-			return DetectorResult{}, err
+			return nil, err
 		}
-		floatVal, err := toFloat(resp.Value)
-		if err != nil {
-			return DetectorResult{}, err
+		if len(samples) == 0 {
+			return []DetectorResult{{Hit: false}}, nil
 		}
-		sampleTS := time.Now().UTC()
-		if resp.TS != "" {
-			if parsed, parseErr := parseTimeValue(resp.TS); parseErr == nil {
-				sampleTS = parsed
+		// Evaluate every new row individually — one alert per out-of-spec value.
+		results := make([]DetectorResult, 0)
+		for _, s := range samples {
+			res := EvaluateSpecLimit(s, *param.Detector.SpecLimit)
+			if res.Hit {
+				results = append(results, res)
 			}
 		}
-		return EvaluateSpecLimit(Sample{TS: sampleTS, Value: floatVal}, *param.Detector.SpecLimit), nil
+		if len(results) == 0 {
+			return []DetectorResult{{Hit: false}}, nil
+		}
+		return results, nil
+
 	case "shewhart":
 		if param.Detector.Shewhart == nil {
-			return DetectorResult{}, errors.New("shewhart detector missing config")
+			return nil, errors.New("shewhart detector missing config")
 		}
 		now := time.Now().UTC()
 		since, start, end, limit, err := buildBaselineWindow(now, param.Detector.Shewhart.Baseline, r.limits.MaxSampleRows)
 		if err != nil {
-			return DetectorResult{}, err
+			return nil, err
 		}
 		queryCtx, cancel := context.WithTimeout(ctx, r.limits.MaxQueryDuration)
 		defer cancel()
 		samples, err := fetchSamples(queryCtx, adapter, spec, param, nil, since, limit, "")
 		if err != nil {
-			return DetectorResult{}, err
+			return nil, err
 		}
 		samples = filterSamplesByRange(samples, start, end)
 		sigma := param.Detector.Shewhart.SigmaMultiplier
@@ -320,15 +383,16 @@ func (r *Registry) evaluateParameter(ctx context.Context, spec RuleSpec, param P
 		}
 		result := EvaluateShewhart(samples, *param.Detector.Shewhart, sigma)
 		applyWindowAndBaseline(&result, samples, start, end, true)
-		return result, nil
+		return []DetectorResult{result}, nil
+
 	case "range_chart":
 		if param.Detector.RangeChart == nil {
-			return DetectorResult{}, errors.New("range_chart detector missing config")
+			return nil, errors.New("range_chart detector missing config")
 		}
 		now := time.Now().UTC()
 		since, start, end, limit, err := buildBaselineWindow(now, param.Detector.RangeChart.Baseline, r.limits.MaxSampleRows)
 		if err != nil {
-			return DetectorResult{}, err
+			return nil, err
 		}
 		mode := param.Detector.RangeChart.Subgrouping.Mode
 		subgroupColumn := ""
@@ -339,7 +403,7 @@ func (r *Registry) evaluateParameter(ctx context.Context, spec RuleSpec, param P
 		defer cancel()
 		samples, err := fetchSamples(queryCtx, adapter, spec, param, nil, since, limit, subgroupColumn)
 		if err != nil {
-			return DetectorResult{}, err
+			return nil, err
 		}
 		samples = filterSamplesByRange(samples, start, end)
 		groups := [][]Sample{}
@@ -351,49 +415,56 @@ func (r *Registry) evaluateParameter(ctx context.Context, spec RuleSpec, param P
 		}
 		result := EvaluateRangeChart(groups, *param.Detector.RangeChart)
 		applyWindowAndBaseline(&result, samples, start, end, true)
-		return result, nil
+		return []DetectorResult{result}, nil
+
 	case "trend":
 		if param.Detector.Trend == nil {
-			return DetectorResult{}, errors.New("trend detector missing config")
+			return nil, errors.New("trend detector missing config")
 		}
 		window := param.Detector.Trend.WindowSize
 		if window == 0 {
 			window = 6
 		}
+		// Use poll-interval window so we only look at genuinely new rows.
+		since := windowSince(spec, lastRunAt)
 		queryCtx, cancel := context.WithTimeout(ctx, r.limits.MaxQueryDuration)
 		defer cancel()
-		samples, err := fetchSamples(queryCtx, adapter, spec, param, nil, time.Now().UTC().Add(-time.Hour*24*365), clampLimit(window, r.limits.MaxSampleRows), "")
+		samples, err := fetchSamples(queryCtx, adapter, spec, param, nil, since, clampLimit(window, r.limits.MaxSampleRows), "")
 		if err != nil {
-			return DetectorResult{}, err
+			return nil, err
 		}
 		if param.Detector.Trend.RequireConsecutiveTimestamps && !hasConsecutiveTimestamps(samples) {
 			result := insufficientData("non-consecutive timestamps")
 			applyWindowAndBaseline(&result, samples, nil, nil, false)
-			return result, nil
+			return []DetectorResult{result}, nil
 		}
 		result := EvaluateTrend6(samples, *param.Detector.Trend)
 		applyWindowAndBaseline(&result, samples, nil, nil, false)
-		return result, nil
+		return []DetectorResult{result}, nil
+
 	case "tpa":
 		if param.Detector.TPA == nil {
-			return DetectorResult{}, errors.New("tpa detector missing config")
+			return nil, errors.New("tpa detector missing config")
 		}
-		queryCtx, cancel := context.WithTimeout(ctx, r.limits.MaxQueryDuration)
-		defer cancel()
 		limit := param.Detector.TPA.WindowN
 		if limit == 0 {
 			limit = 3
 		}
-		samples, err := fetchSamples(queryCtx, adapter, spec, param, nil, time.Now().UTC().Add(-time.Hour*24*365), clampLimit(limit, r.limits.MaxSampleRows), "")
+		// Use poll-interval window so we only look at genuinely new rows.
+		since := windowSince(spec, lastRunAt)
+		queryCtx, cancel := context.WithTimeout(ctx, r.limits.MaxQueryDuration)
+		defer cancel()
+		samples, err := fetchSamples(queryCtx, adapter, spec, param, nil, since, clampLimit(limit, r.limits.MaxSampleRows), "")
 		if err != nil {
-			return DetectorResult{}, err
+			return nil, err
 		}
 		result := EvaluateTPA(samples, *param.Detector.TPA)
 		applyWindowAndBaseline(&result, samples, nil, nil, false)
-		return result, nil
+		return []DetectorResult{result}, nil
+
 	default:
 		if param.Detector.Threshold == nil {
-			return DetectorResult{}, errors.New("threshold detector missing config")
+			return nil, errors.New("threshold detector missing config")
 		}
 		if spec.Aggregation != "" && spec.Aggregation != "latest" && spec.WindowSeconds != nil {
 			queryCtx, cancel := context.WithTimeout(ctx, r.limits.MaxQueryDuration)
@@ -408,9 +479,13 @@ func (r *Registry) evaluateParameter(ctx context.Context, spec RuleSpec, param P
 				WindowSeconds:   *spec.WindowSeconds,
 			})
 			if err != nil {
-				return DetectorResult{}, err
+				return nil, err
 			}
-			return EvaluateThresholdDetector(*param.Detector.Threshold, resp.Value)
+			r2, err2 := EvaluateThresholdDetector(*param.Detector.Threshold, resp.Value)
+			if err2 != nil {
+				return nil, err2
+			}
+			return []DetectorResult{r2}, nil
 		}
 		queryCtx, cancel := context.WithTimeout(ctx, r.limits.MaxQueryDuration)
 		defer cancel()
@@ -422,9 +497,13 @@ func (r *Registry) evaluateParameter(ctx context.Context, spec RuleSpec, param P
 			Where:           toWhere(spec.Source.Where),
 		})
 		if err != nil {
-			return DetectorResult{}, err
+			return nil, err
 		}
-		return EvaluateThresholdDetector(*param.Detector.Threshold, resp.Value)
+		r2, err2 := EvaluateThresholdDetector(*param.Detector.Threshold, resp.Value)
+		if err2 != nil {
+			return nil, err2
+		}
+		return []DetectorResult{r2}, nil
 	}
 }
 

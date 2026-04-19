@@ -26,8 +26,11 @@ func (m *mockResolver) ResolveByRef(ctx context.Context, connectionRef string) (
 }
 
 type mockConnector struct {
-	listCalled     bool
-	describeCalled bool
+	listCalled       bool
+	describeCalled   bool
+	writeRowCalled   bool
+	writeRowErr      error
+	writeRowAffected int64
 }
 
 func (m *mockConnector) TestConnection(ctx context.Context) error { return nil }
@@ -44,6 +47,10 @@ func (m *mockConnector) SampleRows(ctx context.Context, table string, limit int)
 }
 func (m *mockConnector) ProfileTable(ctx context.Context, table string, opts dbconnector.ProfileOptions) (*dbconnector.TableProfile, error) {
 	return &dbconnector.TableProfile{}, nil
+}
+func (m *mockConnector) WriteRow(_ context.Context, _, _, _ string, _ any, _ map[string]any) (int64, error) {
+	m.writeRowCalled = true
+	return m.writeRowAffected, m.writeRowErr
 }
 func (m *mockConnector) Close() error { return nil }
 

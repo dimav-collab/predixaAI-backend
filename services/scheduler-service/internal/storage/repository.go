@@ -15,7 +15,7 @@ func NewRepository(store *Store) *Repository {
 
 func (r *Repository) ListEnabledRules(ctx context.Context) ([]RuleRecord, error) {
 	rows, err := r.Store.Pool.Query(ctx, `
-		SELECT id, connection_ref, rule_json, enabled, status, last_error, last_validated_at
+		SELECT id, connection_ref, rule_json, enabled, status, last_error, last_validated_at, last_run_at
 		FROM rules WHERE enabled = true`)
 	if err != nil {
 		return nil, err
@@ -24,7 +24,7 @@ func (r *Repository) ListEnabledRules(ctx context.Context) ([]RuleRecord, error)
 	results := []RuleRecord{}
 	for rows.Next() {
 		var rec RuleRecord
-		if err := rows.Scan(&rec.ID, &rec.ConnectionRef, &rec.RuleJSON, &rec.Enabled, &rec.Status, &rec.LastError, &rec.LastValidated); err != nil {
+		if err := rows.Scan(&rec.ID, &rec.ConnectionRef, &rec.RuleJSON, &rec.Enabled, &rec.Status, &rec.LastError, &rec.LastValidated, &rec.LastRunAt); err != nil {
 			return nil, err
 		}
 		results = append(results, rec)
@@ -34,10 +34,10 @@ func (r *Repository) ListEnabledRules(ctx context.Context) ([]RuleRecord, error)
 
 func (r *Repository) GetRule(ctx context.Context, id string) (RuleRecord, error) {
 	row := r.Store.Pool.QueryRow(ctx, `
-		SELECT id, connection_ref, rule_json, enabled, status, last_error, last_validated_at
+		SELECT id, connection_ref, rule_json, enabled, status, last_error, last_validated_at, last_run_at
 		FROM rules WHERE id=$1`, id)
 	var rec RuleRecord
-	if err := row.Scan(&rec.ID, &rec.ConnectionRef, &rec.RuleJSON, &rec.Enabled, &rec.Status, &rec.LastError, &rec.LastValidated); err != nil {
+	if err := row.Scan(&rec.ID, &rec.ConnectionRef, &rec.RuleJSON, &rec.Enabled, &rec.Status, &rec.LastError, &rec.LastValidated, &rec.LastRunAt); err != nil {
 		return RuleRecord{}, ErrNotFound
 	}
 	return rec, nil
@@ -55,6 +55,12 @@ func (r *Repository) GetConnectionType(ctx context.Context, id string) (string, 
 func (r *Repository) UpdateRuleStatus(ctx context.Context, id, status string, lastError []byte) error {
 	_, err := r.Store.Pool.Exec(ctx, `
 		UPDATE rules SET status=$1, last_error=$2, last_validated_at=now(), updated_at=now() WHERE id=$3`, status, lastError, id)
+	return err
+}
+
+func (r *Repository) UpdateLastRunAt(ctx context.Context, id string, ts time.Time) error {
+	_, err := r.Store.Pool.Exec(ctx, `
+		UPDATE rules SET last_run_at=$1, updated_at=now() WHERE id=$2`, ts, id)
 	return err
 }
 

@@ -12,6 +12,37 @@ import (
 	"predixaai-backend/services/rule-service/internal/storage"
 )
 
+// syncStepperRule converts the stepper rule into a RuleSpec, upserts it into the
+// `rules` table (the scheduler's source of truth), then publishes a NATS event.
+// Errors here are non-fatal for the HTTP response: we log them and move on.
+func (h *Handler) syncStepperRule(ctx context.Context, rec storage.StepperRule, natsSubject string) {
+	unit, err := h.Repo.GetMachineUnit(ctx, rec.UnitID)
+	if err != nil {
+		return // unit not found; scheduler cannot evaluate without a unit
+	}
+	spec, err := BuildRuleSpecFromStepper(rec, unit)
+	if err != nil {
+		return // unsupported rule type or bad config; leave scheduler untouched
+	}
+	ruleJSON, err := json.Marshal(spec)
+	if err != nil {
+		return
+	}
+	_ = h.Repo.UpsertStepperRuleToRules(ctx, storage.RuleRecord{
+		ID:            rec.ID,
+		Name:          rec.Name,
+		Description:   "",
+		ConnectionRef: unit.ConnectionRef,
+		ParameterName: rec.ParameterID,
+		RuleJSON:      ruleJSON,
+		Enabled:       rec.Enabled,
+		Status:        "DRAFT",
+	})
+	if h.Bus != nil {
+		_ = h.Bus.Publish(natsSubject, map[string]any{"rule_id": rec.ID})
+	}
+}
+
 func (h *Handler) handleStepperRuleCreate(w http.ResponseWriter, r *http.Request) {
 	var req stepperRuleRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -36,6 +67,20 @@ func (h *Handler) handleStepperRuleCreate(w http.ResponseWriter, r *http.Request
 	rec, err := h.Repo.CreateStepperRule(ctx, toStepperRecord(req, true))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "message": "failed to create rule"})
+		return
+	}
+	h.syncStepperRule(ctx, rec, "rule.created")
+	writeJSON(w, http.StatusOK, toStepperResponse(rec))
+}
+
+
+func (h *Handler) handleStepperRuleGetByID(w http.ResponseWriter, r *http.Request) {
+	ruleID := chi.URLParam(r, "ruleId")
+	ctx, cancel := context.WithTimeout(r.Context(), h.Timeout)
+	defer cancel()
+	rec, err := h.Repo.GetStepperRule(ctx, ruleID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "message": "rule not found"})
 		return
 	}
 	writeJSON(w, http.StatusOK, toStepperResponse(rec))
@@ -74,6 +119,7 @@ func (h *Handler) handleStepperRuleUpdate(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "message": "failed to update rule"})
 		return
 	}
+	h.syncStepperRule(ctx, updated, "rule.updated")
 	writeJSON(w, http.StatusOK, toStepperResponse(updated))
 }
 
@@ -84,6 +130,11 @@ func (h *Handler) handleStepperRuleDelete(w http.ResponseWriter, r *http.Request
 	if err := h.Repo.DeleteStepperRule(ctx, ruleID); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "message": "rule not found"})
 		return
+	}
+	// Remove from rules table so the scheduler stops evaluating it.
+	_ = h.Repo.DeleteRule(ctx, ruleID)
+	if h.Bus != nil {
+		_ = h.Bus.Publish("rule.deleted", map[string]any{"rule_id": ruleID})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -96,6 +147,9 @@ func (h *Handler) handleStepperRuleEnable(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "message": "rule not found"})
 		return
 	}
+	if rec, err := h.Repo.GetStepperRule(ctx, ruleID); err == nil {
+		h.syncStepperRule(ctx, rec, "rule.enabled")
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -106,6 +160,9 @@ func (h *Handler) handleStepperRuleDisable(w http.ResponseWriter, r *http.Reques
 	if err := h.Repo.SetStepperRuleEnabled(ctx, ruleID, false); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "message": "rule not found"})
 		return
+	}
+	if rec, err := h.Repo.GetStepperRule(ctx, ruleID); err == nil {
+		h.syncStepperRule(ctx, rec, "rule.disabled")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

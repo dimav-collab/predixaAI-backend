@@ -213,3 +213,47 @@ func (c *MySQLConnector) estimateRowCount(ctx context.Context, table string) (in
 	}
 	return count.Int64, nil
 }
+
+func (c *MySQLConnector) WriteRow(ctx context.Context, table, valueColumn, timestampColumn string, value any, extraColumns map[string]any) (int64, error) {
+	quotedTable, _, err := quoteQualified(table, 1, func(s string) string { return "`" + s + "`" })
+	if err != nil {
+		return 0, fmt.Errorf("invalid mysql table: %w", err)
+	}
+	quotedVal, err := quoteList([]string{valueColumn}, func(s string) string { return "`" + s + "`" })
+	if err != nil {
+		return 0, fmt.Errorf("invalid mysql value column: %w", err)
+	}
+	quotedTs, err := quoteList([]string{timestampColumn}, func(s string) string { return "`" + s + "`" })
+	if err != nil {
+		return 0, fmt.Errorf("invalid mysql timestamp column: %w", err)
+	}
+
+	colParts := []string{quotedVal, quotedTs}
+	placeholders := []string{"?", "NOW()"}
+	args := []any{value}
+
+	for k, v := range extraColumns {
+		qk, qErr := quoteList([]string{k}, func(s string) string { return "`" + s + "`" })
+		if qErr != nil {
+			return 0, fmt.Errorf("invalid extra column %q: %w", k, qErr)
+		}
+		colParts = append(colParts, qk)
+		placeholders = append(placeholders, "?")
+		args = append(args, v)
+	}
+
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+		quotedTable,
+		strings.Join(colParts, ", "),
+		strings.Join(placeholders, ", "),
+	)
+	result, err := c.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("mysql write row: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("mysql rows affected: %w", err)
+	}
+	return n, nil
+}

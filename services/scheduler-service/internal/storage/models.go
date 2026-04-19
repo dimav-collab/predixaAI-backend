@@ -10,6 +10,7 @@ type RuleRecord struct {
 	Status        string
 	LastError     []byte
 	LastValidated *time.Time
+	LastRunAt     *time.Time
 }
 
 type AlertRecord struct {

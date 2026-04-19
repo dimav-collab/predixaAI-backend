@@ -30,6 +30,11 @@ type DbConnector interface {
 
 	ProfileTable(ctx context.Context, table string, opts ProfileOptions) (*TableProfile, error)
 
+	// WriteRow inserts a single row into table, setting valueColumn to value,
+	// timestampColumn to the database's current timestamp, and any extra columns
+	// provided in extraColumns. Returns the number of rows affected (always 1 on success).
+	WriteRow(ctx context.Context, table, valueColumn, timestampColumn string, value any, extraColumns map[string]any) (int64, error)
+
 	Close() error
 }
 

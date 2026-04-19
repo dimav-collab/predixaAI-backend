@@ -233,3 +233,49 @@ func (c *PostgresConnector) estimateRowCount(ctx context.Context, table string) 
 	}
 	return count.Int64, nil
 }
+
+func (c *PostgresConnector) WriteRow(ctx context.Context, table, valueColumn, timestampColumn string, value any, extraColumns map[string]any) (int64, error) {
+	quotedTable, _, err := quoteQualified(table, 2, func(s string) string { return "\"" + s + "\"" })
+	if err != nil {
+		return 0, fmt.Errorf("invalid postgres table: %w", err)
+	}
+	quotedVal, err := quoteList([]string{valueColumn}, func(s string) string { return "\"" + s + "\"" })
+	if err != nil {
+		return 0, fmt.Errorf("invalid postgres value column: %w", err)
+	}
+	quotedTs, err := quoteList([]string{timestampColumn}, func(s string) string { return "\"" + s + "\"" })
+	if err != nil {
+		return 0, fmt.Errorf("invalid postgres timestamp column: %w", err)
+	}
+
+	colParts := []string{quotedVal, quotedTs}
+	placeholders := []string{"$1", "NOW()"}
+	args := []any{value}
+	idx := 2
+
+	for k, v := range extraColumns {
+		qk, qErr := quoteList([]string{k}, func(s string) string { return "\"" + s + "\"" })
+		if qErr != nil {
+			return 0, fmt.Errorf("invalid extra column %q: %w", k, qErr)
+		}
+		colParts = append(colParts, qk)
+		placeholders = append(placeholders, fmt.Sprintf("$%d", idx))
+		args = append(args, v)
+		idx++
+	}
+
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+		quotedTable,
+		strings.Join(colParts, ", "),
+		strings.Join(placeholders, ", "),
+	)
+	result, err := c.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("postgres write row: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("postgres rows affected: %w", err)
+	}
+	return n, nil
+}
