@@ -1,52 +1,65 @@
 services:
+
+  # ── Databases ──────────────────────────────────────────────────────────────
   postgres:
-    image: postgres:16
+    image: postgres:16-alpine
     environment:
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_USER=postgres
-      - POSTGRES_DB=rules
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: rules
     ports:
       - "5432:5432"
     networks:
       - control_net
       - data_net
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init-kratos.sql:/docker-entrypoint-initdb.d/init-kratos.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # ── Messaging ──────────────────────────────────────────────────────────────
   nats:
     image: nats:2.10
     ports:
       - "4222:4222"
     networks:
       - control_net
+
+  # ── Go backend services ────────────────────────────────────────────────────
   db-connector:
     build:
       context: .
       dockerfile: Dockerfile
     environment:
-      - PORT=8080
-      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/rules?sslmode=disable
-      - ENCRYPTION_KEY=0123456789abcdef0123456789abcdef
+      PORT: 8080
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/rules?sslmode=disable
+      ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef
     ports:
       - "8085:8080"
     networks:
       - control_net
       - data_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   rule-service:
     build:
       context: .
       dockerfile: services/rule-service/Dockerfile
     environment:
-      - PORT=8090
-      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/rules?sslmode=disable
-      - NATS_URL=nats://nats:4222
-      - ENCRYPTION_KEY=0123456789abcdef0123456789abcdef
-      - RULE_POLL_MIN=5
-      - RULE_POLL_MAX=3600
-      - DB_CONNECTOR_URL=http://db-connector:8080
-      - SCHEDULER_ADMIN_URL=http://scheduler-service:8091
+      PORT: 8090
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/rules?sslmode=disable
+      NATS_URL: nats://nats:4222
+      ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef
+      RULE_POLL_MIN: 5
+      RULE_POLL_MAX: 3600
+      DB_CONNECTOR_URL: http://db-connector:8080
+      SCHEDULER_ADMIN_URL: http://scheduler-service:8091
     ports:
       - "8090:8090"
     networks:
@@ -56,19 +69,20 @@ services:
         condition: service_healthy
       nats:
         condition: service_started
+
   scheduler-service:
     build:
       context: ./services/scheduler-service
     environment:
-      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/rules?sslmode=disable
-      - NATS_URL=nats://nats:4222
-      - MCP_CONFIG_PATH=/app/mcp.yaml
-      - MCP_POSTGRES_HTTP=http://postgres-mcp:9001/rpc
-      - MCP_MYSQL_HTTP=http://mysql-mcp:9002/rpc
-      - ALLOWLIST_TABLES=telemetry,metrics,etchers_data
-      - WORKER_COUNT=4
-      - JOB_TIMEOUT_SECONDS=10
-      - ADMIN_PORT=8091
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/rules?sslmode=disable
+      NATS_URL: nats://nats:4222
+      MCP_CONFIG_PATH: /app/mcp.yaml
+      MCP_POSTGRES_HTTP: http://postgres-mcp:9001/rpc
+      MCP_MYSQL_HTTP: http://mysql-mcp:9002/rpc
+      ALLOWLIST_TABLES: telemetry,metrics,etchers_data
+      WORKER_COUNT: 4
+      JOB_TIMEOUT_SECONDS: 10
+      ADMIN_PORT: 8091
     ports:
       - "8091:8091"
     networks:
@@ -81,15 +95,16 @@ services:
         condition: service_healthy
       nats:
         condition: service_started
+
   postgres-mcp:
     build:
       context: .
       dockerfile: Dockerfile.mcp
     environment:
-      - PORT=9001
-      - MCP_DB_TYPE=postgres
-      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/rules?sslmode=disable
-      - ENCRYPTION_KEY=0123456789abcdef0123456789abcdef
+      PORT: 9001
+      MCP_DB_TYPE: postgres
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/rules?sslmode=disable
+      ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef
     ports:
       - "9001:9001"
     networks:
@@ -97,15 +112,16 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+
   mysql-mcp:
     build:
       context: .
       dockerfile: Dockerfile.mcp
     environment:
-      - PORT=9002
-      - MCP_DB_TYPE=mysql
-      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/rules?sslmode=disable
-      - ENCRYPTION_KEY=0123456789abcdef0123456789abcdef
+      PORT: 9002
+      MCP_DB_TYPE: mysql
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/rules?sslmode=disable
+      ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef
     ports:
       - "9002:9002"
     networks:
@@ -114,7 +130,71 @@ services:
       postgres:
         condition: service_healthy
 
+  # ── Ory Kratos ─────────────────────────────────────────────────────────────
+  kratos-migrate:
+    image: oryd/kratos:v1.3.1
+    environment:
+      DSN: postgres://postgres:postgres@postgres:5432/kratos?sslmode=disable
+    command: migrate sql -e --yes
+    networks:
+      - control_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+
+  kratos:
+    image: oryd/kratos:v1.3.1
+    environment:
+      DSN: postgres://postgres:postgres@postgres:5432/kratos?sslmode=disable
+      LOG_LEVEL: info
+      SECRETS_COOKIE: ${KRATOS_COOKIE_SECRET}
+      SECRETS_CIPHER: ${KRATOS_CIPHER_SECRET}
+    command: serve -c /etc/config/kratos/kratos.yml --dev --watch-courier
+    volumes:
+      - ../predixaAI/bff/kratos:/etc/config/kratos
+    ports:
+      - "4433:4433"
+      - "4434:4434"
+    networks:
+      - control_net
+    depends_on:
+      kratos-migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:4433/health/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # ── BFF (Node.js / Fastify) ────────────────────────────────────────────────
+  bff:
+    build:
+      context: ../predixaAI/bff
+    env_file:
+      - ../predixaAI/bff/.env
+    environment:
+      GO_BACKEND_BASE_URL: http://db-connector:8080
+      RULE_SERVICE_BASE_URL: http://rule-service:8090
+      KRATOS_PUBLIC_URL: http://kratos:4433
+      KRATOS_ADMIN_URL: http://kratos:4434
+    ports:
+      - "3000:3000"
+    networks:
+      - control_net
+    depends_on:
+      kratos:
+        condition: service_healthy
+      db-connector:
+        condition: service_started
+      rule-service:
+        condition: service_started
 
 networks:
   control_net:
   data_net:
+
+volumes:
+  pgdata:
