@@ -169,6 +169,15 @@ services:
       timeout: 5s
       retries: 12
 
+  # ── Mail catcher (dev only) ────────────────────────────────────────────────
+  mailslurper:
+    image: oryd/mailslurper:latest-smtps
+    ports:
+      - "4436:4436"   # SMTP
+      - "4437:4437"   # Web UI
+    networks:
+      - control_net
+
   # ── BFF (Node.js / Fastify) ────────────────────────────────────────────────
   bff:
     build:
@@ -180,6 +189,9 @@ services:
       RULE_SERVICE_BASE_URL: http://rule-service:8090
       KRATOS_PUBLIC_URL: http://kratos:4433
       KRATOS_ADMIN_URL: http://kratos:4434
+      SMTP_HOST: smtp.gmail.com
+      SMTP_PORT: "587"
+      SMTP_SECURE: "false"
     ports:
       - "3000:3000"
     networks:
@@ -187,6 +199,8 @@ services:
     depends_on:
       kratos:
         condition: service_healthy
+      mailslurper:
+        condition: service_started
       db-connector:
         condition: service_started
       rule-service:
