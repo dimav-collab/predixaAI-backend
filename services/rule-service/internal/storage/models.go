@@ -58,10 +58,11 @@ type MachineUnit struct {
 	SelectedColumns []string
 	LiveParameters  json.RawMessage
 	RuleIDs         []string
-	PosX            float64
-	PosY            float64
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	PosX             float64
+	PosY             float64
+	ProductionLineID string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 type StepperRule struct {
@@ -104,4 +105,12 @@ type SimulationJob struct {
 	Config          json.RawMessage // extra per-mode config (e.g. baseValue, step, usl, lsl)
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+}
+
+// ProductionLine groups machine units into a named production line.
+type ProductionLine struct {
+	LineID    string
+	LineName  string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }

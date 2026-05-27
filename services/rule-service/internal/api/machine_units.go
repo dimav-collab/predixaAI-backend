@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"log/slog"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -24,27 +25,29 @@ const (
 var identifierRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 type machineUnitRequest struct {
-	UnitID          string          `json:"unitId"`
-	UnitName        string          `json:"unitName"`
-	ConnectionRef   string          `json:"connectionRef"`
-	SelectedTable   string          `json:"selectedTable"`
-	TimestampColumn string          `json:"timestampColumn"`
-	SelectedColumns []string        `json:"selectedColumns"`
-	LiveParameters  json.RawMessage `json:"liveParameters"`
-	RuleIDs         ruleIDList      `json:"rule"`
-	Pos             *positionInput  `json:"pos"`
+	UnitID            string          `json:"unitId"`
+	UnitName          string          `json:"unitName"`
+	ConnectionRef     string          `json:"connectionRef"`
+	SelectedTable     string          `json:"selectedTable"`
+	TimestampColumn   string          `json:"timestampColumn"`
+	SelectedColumns   []string        `json:"selectedColumns"`
+	LiveParameters    json.RawMessage `json:"liveParameters"`
+	RuleIDs           ruleIDList      `json:"rule"`
+	Pos               *positionInput  `json:"pos"`
+	ProductionLineID  string          `json:"productionLineId"`
 }
 
 type machineUnitResponse struct {
-	UnitID          string          `json:"unitId"`
-	UnitName        string          `json:"unitName"`
-	ConnectionRef   string          `json:"connectionRef"`
-	SelectedTable   string          `json:"selectedTable"`
-	TimestampColumn string          `json:"timestampColumn"`
-	SelectedColumns []string        `json:"selectedColumns"`
-	LiveParameters  json.RawMessage `json:"liveParameters"`
-	RuleIDs         []string        `json:"rule"`
-	Pos             positionInput   `json:"pos"`
+	UnitID            string          `json:"unitId"`
+	UnitName          string          `json:"unitName"`
+	ConnectionRef     string          `json:"connectionRef"`
+	SelectedTable     string          `json:"selectedTable"`
+	TimestampColumn   string          `json:"timestampColumn"`
+	SelectedColumns   []string        `json:"selectedColumns"`
+	LiveParameters    json.RawMessage `json:"liveParameters"`
+	RuleIDs           []string        `json:"rule"`
+	Pos               positionInput   `json:"pos"`
+	ProductionLineID  string          `json:"productionLineId"`
 }
 
 type updateRulesRequest struct {
@@ -149,7 +152,7 @@ func (h *Handler) handleMachineUnitCreate(w http.ResponseWriter, r *http.Request
 	unit.UnitID = "machine-" + uuid.NewString()
 	created, err := h.Repo.CreateMachineUnit(r.Context(), unit)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "message": "failed to create machine unit"})
+		slog.Error("create machine unit", "err", err); writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "message": "failed to create machine unit"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "unit": buildMachineUnitResponse(created)})
@@ -508,15 +511,16 @@ func (h *Handler) validateMachineUnitRequest(ctx context.Context, req machineUni
 		}
 	}
 	return storage.MachineUnit{
-		UnitName:        unitName,
-		ConnectionRef:   connectionRef,
-		SelectedTable:   selectedTable,
-		TimestampColumn: timestampColumn,
-		SelectedColumns: columns,
-		LiveParameters:  liveParams,
-		RuleIDs:         ruleIDs,
-		PosX:            posX,
-		PosY:            posY,
+		UnitName:         unitName,
+		ConnectionRef:    connectionRef,
+		SelectedTable:    selectedTable,
+		TimestampColumn:  timestampColumn,
+		SelectedColumns:  columns,
+		LiveParameters:   liveParams,
+		RuleIDs:          ruleIDs,
+		PosX:             posX,
+		PosY:             posY,
+		ProductionLineID: strings.TrimSpace(req.ProductionLineID),
 	}, details
 }
 
@@ -604,14 +608,15 @@ func normalizeRawMessage(raw json.RawMessage) json.RawMessage {
 func buildMachineUnitResponse(unit storage.MachineUnit) machineUnitResponse {
 	live := normalizeRawMessage(unit.LiveParameters)
 	return machineUnitResponse{
-		UnitID:          unit.UnitID,
-		UnitName:        unit.UnitName,
-		ConnectionRef:   unit.ConnectionRef,
-		SelectedTable:   unit.SelectedTable,
-		TimestampColumn: unit.TimestampColumn,
-		SelectedColumns: unit.SelectedColumns,
-		LiveParameters:  live,
-		RuleIDs:         unit.RuleIDs,
+		UnitID:           unit.UnitID,
+		UnitName:         unit.UnitName,
+		ConnectionRef:    unit.ConnectionRef,
+		SelectedTable:    unit.SelectedTable,
+		TimestampColumn:  unit.TimestampColumn,
+		SelectedColumns:  unit.SelectedColumns,
+		LiveParameters:   live,
+		RuleIDs:          unit.RuleIDs,
+		ProductionLineID: unit.ProductionLineID,
 		Pos: positionInput{
 			X: unit.PosX,
 			Y: unit.PosY,
