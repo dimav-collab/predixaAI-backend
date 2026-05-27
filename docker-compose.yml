@@ -181,7 +181,8 @@ services:
   # ── BFF (Node.js / Fastify) ────────────────────────────────────────────────
   bff:
     build:
-      context: ../predixaAI/bff
+      context: ../predixaAI
+      dockerfile: bff/Dockerfile
     env_file:
       - ../predixaAI/bff/.env
     environment:

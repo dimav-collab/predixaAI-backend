@@ -64,7 +64,7 @@ func (r *Repository) CreateRule(ctx context.Context, rec RuleRecord) (string, er
 	id := uuid.NewString()
 	_, err := r.Store.Pool.Exec(ctx, `
 		INSERT INTO rules (id, name, description, connection_ref, parameter_name, rule_json, enabled, status, last_error, last_validated_at, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),now())`,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now(),now())`,
 		id, rec.Name, rec.Description, rec.ConnectionRef, rec.ParameterName, rec.RuleJSON, rec.Enabled, rec.Status, rec.LastError, rec.LastValidatedAt,
 	)
 	if err != nil {
@@ -93,7 +93,7 @@ func (r *Repository) SetRuleEnabled(ctx context.Context, id string, enabled bool
 func (r *Repository) UpsertStepperRuleToRules(ctx context.Context, rec RuleRecord) error {
 	_, err := r.Store.Pool.Exec(ctx, `
 		INSERT INTO rules (id, name, description, connection_ref, parameter_name, rule_json, enabled, status, last_error, last_validated_at, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),now())
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now(),now())
 		ON CONFLICT (id) DO UPDATE
 		  SET name=$2, description=$3, connection_ref=$4, parameter_name=$5,
 		      rule_json=$6, enabled=$7, status=$8, last_error=$9, last_validated_at=$10,
@@ -184,18 +184,22 @@ func (r *Repository) CreateMachineUnit(ctx context.Context, unit MachineUnit) (M
 		return MachineUnit{}, err
 	}
 	liveParamsJSON := normalizeRawJSON(unit.LiveParameters)
+	var plID *string
+	if unit.ProductionLineID != "" {
+		plID = &unit.ProductionLineID
+	}
 	row := r.Store.Pool.QueryRow(ctx, `
-		INSERT INTO machine_units (unit_id, unit_name, connection_ref, selected_table, timestamp_column, selected_columns, live_parameters, rule_ids, pos_x, pos_y, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),now())
-		RETURNING unit_id, unit_name, connection_ref, selected_table, timestamp_column, selected_columns, live_parameters, rule_ids, pos_x, pos_y, created_at, updated_at`,
-		unit.UnitID, unit.UnitName, unit.ConnectionRef, unit.SelectedTable, unit.TimestampColumn, selectedColumnsJSON, liveParamsJSON, ruleIDsJSON, unit.PosX, unit.PosY,
+		INSERT INTO machine_units (unit_id, unit_name, connection_ref, selected_table, timestamp_column, selected_columns, live_parameters, rule_ids, pos_x, pos_y, production_line_id, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now(),now())
+		RETURNING unit_id, unit_name, connection_ref, selected_table, timestamp_column, selected_columns, live_parameters, rule_ids, pos_x, pos_y, production_line_id, created_at, updated_at`,
+		unit.UnitID, unit.UnitName, unit.ConnectionRef, unit.SelectedTable, unit.TimestampColumn, selectedColumnsJSON, liveParamsJSON, ruleIDsJSON, unit.PosX, unit.PosY, plID,
 	)
 	return scanMachineUnit(row)
 }
 
 func (r *Repository) ListMachineUnits(ctx context.Context) ([]MachineUnit, error) {
 	rows, err := r.Store.Pool.Query(ctx, `
-		SELECT unit_id, unit_name, connection_ref, selected_table, timestamp_column, selected_columns, live_parameters, rule_ids, pos_x, pos_y, created_at, updated_at
+		SELECT unit_id, unit_name, connection_ref, selected_table, timestamp_column, selected_columns, live_parameters, rule_ids, pos_x, pos_y, production_line_id, created_at, updated_at
 		FROM machine_units ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -214,7 +218,7 @@ func (r *Repository) ListMachineUnits(ctx context.Context) ([]MachineUnit, error
 
 func (r *Repository) GetMachineUnit(ctx context.Context, unitID string) (MachineUnit, error) {
 	row := r.Store.Pool.QueryRow(ctx, `
-		SELECT unit_id, unit_name, connection_ref, selected_table, timestamp_column, selected_columns, live_parameters, rule_ids, pos_x, pos_y, created_at, updated_at
+		SELECT unit_id, unit_name, connection_ref, selected_table, timestamp_column, selected_columns, live_parameters, rule_ids, pos_x, pos_y, production_line_id, created_at, updated_at
 		FROM machine_units WHERE unit_id=$1`, unitID)
 	unit, err := scanMachineUnit(row)
 	if err != nil {
@@ -240,7 +244,7 @@ func (r *Repository) UpdateMachineUnit(ctx context.Context, unit MachineUnit) (M
 		UPDATE machine_units
 		SET unit_name=$1, connection_ref=$2, selected_table=$3, timestamp_column=$4, selected_columns=$5, live_parameters=$6, rule_ids=$7, pos_x=$8, pos_y=$9, updated_at=now()
 		WHERE unit_id=$10
-		RETURNING unit_id, unit_name, connection_ref, selected_table, timestamp_column, selected_columns, live_parameters, rule_ids, pos_x, pos_y, created_at, updated_at`,
+		RETURNING unit_id, unit_name, connection_ref, selected_table, timestamp_column, selected_columns, live_parameters, rule_ids, pos_x, pos_y, production_line_id, created_at, updated_at`,
 		unit.UnitName, unit.ConnectionRef, unit.SelectedTable, unit.TimestampColumn, selectedColumnsJSON, liveParamsJSON, ruleIDsJSON, unit.PosX, unit.PosY, unit.UnitID,
 	)
 	updated, err := scanMachineUnit(row)
@@ -307,7 +311,7 @@ func (r *Repository) UpdateTable(ctx context.Context, unitID string, table strin
 		UPDATE machine_units
 		SET selected_table=$1, timestamp_column=$2, selected_columns=$3, updated_at=now()
 		WHERE unit_id=$4
-		RETURNING unit_id, unit_name, connection_ref, selected_table, timestamp_column, selected_columns, live_parameters, rule_ids, pos_x, pos_y, created_at, updated_at`,
+		RETURNING unit_id, unit_name, connection_ref, selected_table, timestamp_column, selected_columns, live_parameters, rule_ids, pos_x, pos_y, production_line_id, created_at, updated_at`,
 		table, "", columnsJSON, unitID,
 	)
 	updated, err := scanMachineUnit(updatedRow)
@@ -324,7 +328,7 @@ func (r *Repository) UpdateConnection(ctx context.Context, unitID string, connec
 	row := r.Store.Pool.QueryRow(ctx, `
 		UPDATE machine_units SET connection_ref=$1, updated_at=now()
 		WHERE unit_id=$2
-		RETURNING unit_id, unit_name, connection_ref, selected_table, timestamp_column, selected_columns, live_parameters, rule_ids, pos_x, pos_y, created_at, updated_at`,
+		RETURNING unit_id, unit_name, connection_ref, selected_table, timestamp_column, selected_columns, live_parameters, rule_ids, pos_x, pos_y, production_line_id, created_at, updated_at`,
 		connectionRef, unitID,
 	)
 	updated, err := scanMachineUnit(row)
@@ -338,7 +342,7 @@ func (r *Repository) UpdatePosition(ctx context.Context, unitID string, x float6
 	row := r.Store.Pool.QueryRow(ctx, `
 		UPDATE machine_units SET pos_x=$1, pos_y=$2, updated_at=now()
 		WHERE unit_id=$3
-		RETURNING unit_id, unit_name, connection_ref, selected_table, timestamp_column, selected_columns, live_parameters, rule_ids, pos_x, pos_y, created_at, updated_at`,
+		RETURNING unit_id, unit_name, connection_ref, selected_table, timestamp_column, selected_columns, live_parameters, rule_ids, pos_x, pos_y, production_line_id, created_at, updated_at`,
 		x, y, unitID,
 	)
 	updated, err := scanMachineUnit(row)
@@ -373,7 +377,7 @@ func (r *Repository) updateMachineUnitJSONArrays(ctx context.Context, unitID str
 		return MachineUnit{}, err
 	}
 	updateQuery := `UPDATE machine_units SET ` + column + `=$1, updated_at=now() WHERE unit_id=$2
-		RETURNING unit_id, unit_name, connection_ref, selected_table, timestamp_column, selected_columns, live_parameters, rule_ids, pos_x, pos_y, created_at, updated_at`
+		RETURNING unit_id, unit_name, connection_ref, selected_table, timestamp_column, selected_columns, live_parameters, rule_ids, pos_x, pos_y, production_line_id, created_at, updated_at`
 	row := tx.QueryRow(ctx, updateQuery, updatedJSON, unitID)
 	unit, err := scanMachineUnit(row)
 	if err != nil {
@@ -418,7 +422,8 @@ func scanMachineUnit(row pgx.Row) (MachineUnit, error) {
 	var selectedColumnsRaw []byte
 	var liveParamsRaw []byte
 	var ruleIDsRaw []byte
-	if err := row.Scan(&unit.UnitID, &unit.UnitName, &unit.ConnectionRef, &unit.SelectedTable, &unit.TimestampColumn, &selectedColumnsRaw, &liveParamsRaw, &ruleIDsRaw, &unit.PosX, &unit.PosY, &unit.CreatedAt, &unit.UpdatedAt); err != nil {
+	var productionLineID *string
+	if err := row.Scan(&unit.UnitID, &unit.UnitName, &unit.ConnectionRef, &unit.SelectedTable, &unit.TimestampColumn, &selectedColumnsRaw, &liveParamsRaw, &ruleIDsRaw, &unit.PosX, &unit.PosY, &productionLineID, &unit.CreatedAt, &unit.UpdatedAt); err != nil {
 		if err == pgx.ErrNoRows {
 			return MachineUnit{}, ErrNotFound
 		}
@@ -435,6 +440,9 @@ func scanMachineUnit(row pgx.Row) (MachineUnit, error) {
 	unit.SelectedColumns = selectedColumns
 	unit.RuleIDs = ruleIDs
 	unit.LiveParameters = normalizeRawJSON(liveParamsRaw)
+	if productionLineID != nil {
+		unit.ProductionLineID = *productionLineID
+	}
 	return unit, nil
 }
 

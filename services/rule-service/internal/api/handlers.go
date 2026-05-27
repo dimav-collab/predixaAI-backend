@@ -108,6 +108,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Post("/rules/validate", h.handleRulesValidate)
 	h.RegisterStepperRoutes(r)
 	h.RegisterMachineUnitRoutes(r)
+	h.RegisterProductionLineRoutes(r)
 	r.Route("/rules", func(r chi.Router) {
 		r.Post("/", h.handleRulesCreate)
 		r.Get("/", h.handleRulesList)
