@@ -114,3 +114,36 @@ type ProductionLine struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
+
+// CanvasWire represents a directed connection between two machine units on the canvas.
+type CanvasWire struct {
+	ID               string
+	ProductionLineID string
+	SourceUnitID     string
+	TargetUnitID     string
+	SourceOffsetX    float64
+	SourceOffsetY    float64
+	TargetOffsetX    float64
+	TargetOffsetY    float64
+	Label            string
+	CreatedAt        time.Time
+}
+
+// ParameterStats holds pre-computed statistics for a single live parameter.
+type ParameterStats struct {
+	ID          string
+	UnitID      string
+	ParameterID string
+	ColumnName  string
+	TableName   string
+	RowCount    int
+	AvgVal      *float64
+	MinVal      *float64
+	MaxVal      *float64
+	StdDev      *float64
+	Sigma2Lower *float64
+	Sigma2Upper *float64
+	Sigma3Lower *float64
+	Sigma3Upper *float64
+	ComputedAt  time.Time
+}
