@@ -468,3 +468,124 @@ func nowPtr() *time.Time {
 	now := time.Now().UTC()
 	return &now
 }
+
+// --- Canvas Wires ---
+
+// ListWiresByLine returns all canvas wires for a production line.
+func (r *Repository) ListWiresByLine(ctx context.Context, lineID string) ([]CanvasWire, error) {
+	rows, err := r.Store.Pool.Query(ctx, `
+		SELECT id, production_line_id, source_unit_id, target_unit_id,
+		       source_offset_x, source_offset_y, target_offset_x, target_offset_y,
+		       label, created_at
+		FROM canvas_wires
+		WHERE production_line_id = $1
+		ORDER BY created_at ASC`, lineID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	wires := []CanvasWire{}
+	for rows.Next() {
+		var w CanvasWire
+		if err := rows.Scan(&w.ID, &w.ProductionLineID, &w.SourceUnitID, &w.TargetUnitID,
+			&w.SourceOffsetX, &w.SourceOffsetY, &w.TargetOffsetX, &w.TargetOffsetY,
+			&w.Label, &w.CreatedAt); err != nil {
+			return nil, err
+		}
+		wires = append(wires, w)
+	}
+	return wires, nil
+}
+
+// ReplaceWiresForLine atomically replaces all wires for a production line.
+func (r *Repository) ReplaceWiresForLine(ctx context.Context, lineID string, wires []CanvasWire) ([]CanvasWire, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	tx, err := r.Store.Pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `DELETE FROM canvas_wires WHERE production_line_id = $1`, lineID); err != nil {
+		return nil, err
+	}
+
+	for _, w := range wires {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO canvas_wires
+			  (id, production_line_id, source_unit_id, target_unit_id,
+			   source_offset_x, source_offset_y, target_offset_x, target_offset_y, label, created_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now())`,
+			w.ID, lineID, w.SourceUnitID, w.TargetUnitID,
+			w.SourceOffsetX, w.SourceOffsetY, w.TargetOffsetX, w.TargetOffsetY,
+			w.Label,
+		); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	return r.ListWiresByLine(ctx, lineID)
+}
+
+// UpsertParameterStats inserts or replaces statistics for a single parameter of a machine unit.
+func (r *Repository) UpsertParameterStats(ctx context.Context, s ParameterStats) error {
+	_, err := r.Store.Pool.Exec(ctx, `
+		INSERT INTO parameter_stats
+			(id, unit_id, parameter_id, column_name, table_name, row_count,
+			 avg_val, min_val, max_val, std_dev,
+			 sigma2_lower, sigma2_upper, sigma3_lower, sigma3_upper, computed_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now())
+		ON CONFLICT (unit_id, parameter_id) DO UPDATE SET
+			column_name   = EXCLUDED.column_name,
+			table_name    = EXCLUDED.table_name,
+			row_count     = EXCLUDED.row_count,
+			avg_val       = EXCLUDED.avg_val,
+			min_val       = EXCLUDED.min_val,
+			max_val       = EXCLUDED.max_val,
+			std_dev       = EXCLUDED.std_dev,
+			sigma2_lower  = EXCLUDED.sigma2_lower,
+			sigma2_upper  = EXCLUDED.sigma2_upper,
+			sigma3_lower  = EXCLUDED.sigma3_lower,
+			sigma3_upper  = EXCLUDED.sigma3_upper,
+			computed_at   = now()`,
+		s.ID, s.UnitID, s.ParameterID, s.ColumnName, s.TableName, s.RowCount,
+		s.AvgVal, s.MinVal, s.MaxVal, s.StdDev,
+		s.Sigma2Lower, s.Sigma2Upper, s.Sigma3Lower, s.Sigma3Upper,
+	)
+	return err
+}
+
+// ListParameterStatsByUnit returns all pre-computed stats for a machine unit.
+func (r *Repository) ListParameterStatsByUnit(ctx context.Context, unitID string) ([]ParameterStats, error) {
+	rows, err := r.Store.Pool.Query(ctx, `
+		SELECT id, unit_id, parameter_id, column_name, table_name, row_count,
+		       avg_val, min_val, max_val, std_dev,
+		       sigma2_lower, sigma2_upper, sigma3_lower, sigma3_upper, computed_at
+		FROM parameter_stats
+		WHERE unit_id = $1
+		ORDER BY computed_at DESC`, unitID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []ParameterStats
+	for rows.Next() {
+		var s ParameterStats
+		if err := rows.Scan(
+			&s.ID, &s.UnitID, &s.ParameterID, &s.ColumnName, &s.TableName, &s.RowCount,
+			&s.AvgVal, &s.MinVal, &s.MaxVal, &s.StdDev,
+			&s.Sigma2Lower, &s.Sigma2Upper, &s.Sigma3Lower, &s.Sigma3Upper, &s.ComputedAt,
+		); err != nil {
+			return nil, err
+		}
+		results = append(results, s)
+	}
+	return results, nil
+}

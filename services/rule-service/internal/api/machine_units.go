@@ -116,6 +116,8 @@ func (h *Handler) RegisterMachineUnitRoutes(r chi.Router) {
 		r.Put("/{unitId}/table", h.handleMachineUnitTable)
 		r.Put("/{unitId}/connection", h.handleMachineUnitConnection)
 		r.Patch("/{unitId}/position", h.handleMachineUnitPosition)
+		r.Post("/{unitId}/parameter-stats", h.handleUpsertParameterStats)
+		r.Get("/{unitId}/parameter-stats", h.handleListParameterStats)
 	})
 }
 
@@ -650,4 +652,129 @@ func validatePosition(pos positionInput) []rules.ErrorDetail {
 		details = append(details, rules.ErrorDetail{Field: "pos.y", Problem: "out_of_range", Hint: "Must be between 0 and 1"})
 	}
 	return details
+}
+
+// ── Parameter stats endpoints ─────────────────────────────────────────────────
+
+type parameterStatInput struct {
+	ParameterID string   `json:"parameterId"`
+	ColumnName  string   `json:"columnName"`
+	TableName   string   `json:"tableName"`
+	RowCount    int      `json:"rowCount"`
+	Avg         *float64 `json:"avg"`
+	Min         *float64 `json:"min"`
+	Max         *float64 `json:"max"`
+	StdDev      *float64 `json:"stdDev"`
+	Sigma2Lower *float64 `json:"sigma2Lower"`
+	Sigma2Upper *float64 `json:"sigma2Upper"`
+	Sigma3Lower *float64 `json:"sigma3Lower"`
+	Sigma3Upper *float64 `json:"sigma3Upper"`
+}
+
+type parameterStatOutput struct {
+	ID          string   `json:"id"`
+	ParameterID string   `json:"parameterId"`
+	ColumnName  string   `json:"columnName"`
+	TableName   string   `json:"tableName"`
+	RowCount    int      `json:"rowCount"`
+	Avg         *float64 `json:"avg"`
+	Min         *float64 `json:"min"`
+	Max         *float64 `json:"max"`
+	StdDev      *float64 `json:"stdDev"`
+	Sigma2Lower *float64 `json:"sigma2Lower"`
+	Sigma2Upper *float64 `json:"sigma2Upper"`
+	Sigma3Lower *float64 `json:"sigma3Lower"`
+	Sigma3Upper *float64 `json:"sigma3Upper"`
+	ComputedAt  string   `json:"computedAt"`
+}
+
+// POST /machine-units/:unitId/parameter-stats
+// Accepts a batch of computed stats and upserts each one.
+func (h *Handler) handleUpsertParameterStats(w http.ResponseWriter, r *http.Request) {
+	unitID := chi.URLParam(r, "unitId")
+	if strings.TrimSpace(unitID) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid unit id"})
+		return
+	}
+
+	var body struct {
+		Stats []parameterStatInput `json:"stats"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid json"})
+		return
+	}
+	if len(body.Stats) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "stats array is empty"})
+		return
+	}
+
+	repo := h.Repo
+	for _, s := range body.Stats {
+		if s.ParameterID == "" || s.ColumnName == "" || s.TableName == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "parameterId, columnName and tableName are required"})
+			return
+		}
+		record := storage.ParameterStats{
+			ID:          uuid.NewString(),
+			UnitID:      unitID,
+			ParameterID: s.ParameterID,
+			ColumnName:  s.ColumnName,
+			TableName:   s.TableName,
+			RowCount:    s.RowCount,
+			AvgVal:      s.Avg,
+			MinVal:      s.Min,
+			MaxVal:      s.Max,
+			StdDev:      s.StdDev,
+			Sigma2Lower: s.Sigma2Lower,
+			Sigma2Upper: s.Sigma2Upper,
+			Sigma3Lower: s.Sigma3Lower,
+			Sigma3Upper: s.Sigma3Upper,
+		}
+		if err := repo.UpsertParameterStats(r.Context(), record); err != nil {
+			slog.Error("upsert parameter stats", "err", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "db error"})
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(body.Stats)})
+}
+
+// GET /machine-units/:unitId/parameter-stats
+func (h *Handler) handleListParameterStats(w http.ResponseWriter, r *http.Request) {
+	unitID := chi.URLParam(r, "unitId")
+	if strings.TrimSpace(unitID) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid unit id"})
+		return
+	}
+
+	repo := h.Repo
+	records, err := repo.ListParameterStatsByUnit(r.Context(), unitID)
+	if err != nil {
+		slog.Error("list parameter stats", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "db error"})
+		return
+	}
+
+	out := make([]parameterStatOutput, 0, len(records))
+	for _, s := range records {
+		out = append(out, parameterStatOutput{
+			ID:          s.ID,
+			ParameterID: s.ParameterID,
+			ColumnName:  s.ColumnName,
+			TableName:   s.TableName,
+			RowCount:    s.RowCount,
+			Avg:         s.AvgVal,
+			Min:         s.MinVal,
+			Max:         s.MaxVal,
+			StdDev:      s.StdDev,
+			Sigma2Lower: s.Sigma2Lower,
+			Sigma2Upper: s.Sigma2Upper,
+			Sigma3Lower: s.Sigma3Lower,
+			Sigma3Upper: s.Sigma3Upper,
+			ComputedAt:  s.ComputedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "stats": out})
 }
