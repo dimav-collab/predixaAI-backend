@@ -1,6 +1,9 @@
 package scheduler
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestEvaluateSpecLimit(t *testing.T) {
 	usl := 10.0
@@ -65,6 +68,29 @@ func TestEvaluateTPA(t *testing.T) {
 	result := EvaluateTPA(samples, spec)
 	if !result.Hit || result.Status != statusViolation {
 		t.Fatalf("expected tpa hit")
+	}
+}
+
+func TestEvaluateTPATimestampBasis(t *testing.T) {
+	// Regression: large Unix timestamps caused catastrophic float64 cancellation
+	// in LinearRegression, making denom=0 and returning invalidConfig.
+	// Centering x values before regression fixes this.
+	threshold := 0.0
+	spec := TPASpec{WindowN: 5, SlopeThreshold: &threshold, RegressionTimeBasis: "timestamp"}
+	base := time.Now()
+	samples := []Sample{
+		{TS: base.Add(0 * time.Second), Value: 20},
+		{TS: base.Add(5 * time.Second), Value: 40},
+		{TS: base.Add(10 * time.Second), Value: 60},
+		{TS: base.Add(15 * time.Second), Value: 80},
+		{TS: base.Add(20 * time.Second), Value: 100},
+	}
+	result := EvaluateTPA(samples, spec)
+	if result.Status == statusInvalidConfig {
+		t.Fatalf("regression failed with timestamp basis (float64 cancellation bug): %v", result.Metadata)
+	}
+	if !result.Hit || result.Status != statusViolation {
+		t.Fatalf("expected tpa hit with positive slope, got status=%s", result.Status)
 	}
 }
 

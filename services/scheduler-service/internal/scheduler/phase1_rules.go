@@ -310,6 +310,13 @@ func EvaluateTPA(samples []Sample, spec TPASpec) DetectorResult {
 		}
 		yVals = append(yVals, sample.Value)
 	}
+	// Center x values to avoid catastrophic cancellation with large Unix timestamps.
+	if len(xVals) > 0 {
+		x0 := xVals[0]
+		for i := range xVals {
+			xVals[i] -= x0
+		}
+	}
 	slope, intercept, r2, ok := LinearRegression(xVals, yVals)
 	if !ok {
 		return invalidConfig("regression failed")

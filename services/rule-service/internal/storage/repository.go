@@ -64,7 +64,7 @@ func (r *Repository) CreateRule(ctx context.Context, rec RuleRecord) (string, er
 	id := uuid.NewString()
 	_, err := r.Store.Pool.Exec(ctx, `
 		INSERT INTO rules (id, name, description, connection_ref, parameter_name, rule_json, enabled, status, last_error, last_validated_at, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now(),now())`,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),now())`,
 		id, rec.Name, rec.Description, rec.ConnectionRef, rec.ParameterName, rec.RuleJSON, rec.Enabled, rec.Status, rec.LastError, rec.LastValidatedAt,
 	)
 	if err != nil {
@@ -93,7 +93,7 @@ func (r *Repository) SetRuleEnabled(ctx context.Context, id string, enabled bool
 func (r *Repository) UpsertStepperRuleToRules(ctx context.Context, rec RuleRecord) error {
 	_, err := r.Store.Pool.Exec(ctx, `
 		INSERT INTO rules (id, name, description, connection_ref, parameter_name, rule_json, enabled, status, last_error, last_validated_at, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now(),now())
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),now())
 		ON CONFLICT (id) DO UPDATE
 		  SET name=$2, description=$3, connection_ref=$4, parameter_name=$5,
 		      rule_json=$6, enabled=$7, status=$8, last_error=$9, last_validated_at=$10,
@@ -190,7 +190,7 @@ func (r *Repository) CreateMachineUnit(ctx context.Context, unit MachineUnit) (M
 	}
 	row := r.Store.Pool.QueryRow(ctx, `
 		INSERT INTO machine_units (unit_id, unit_name, connection_ref, selected_table, timestamp_column, selected_columns, live_parameters, rule_ids, pos_x, pos_y, production_line_id, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now(),now())
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),now())
 		RETURNING unit_id, unit_name, connection_ref, selected_table, timestamp_column, selected_columns, live_parameters, rule_ids, pos_x, pos_y, production_line_id, created_at, updated_at`,
 		unit.UnitID, unit.UnitName, unit.ConnectionRef, unit.SelectedTable, unit.TimestampColumn, selectedColumnsJSON, liveParamsJSON, ruleIDsJSON, unit.PosX, unit.PosY, plID,
 	)
