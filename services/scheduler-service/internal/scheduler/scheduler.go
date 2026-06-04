@@ -377,6 +377,14 @@ func (r *Registry) evaluateParameterSince(ctx context.Context, spec RuleSpec, pa
 			return nil, err
 		}
 		samples = filterSamplesByRange(samples, start, end)
+		// Skip evaluation if the latest sample has not changed since the last run.
+		// This prevents the same anomalous data row from firing a new alert every poll cycle.
+		if len(samples) > 0 && lastRunAt != nil {
+			latestSampleTS := samples[len(samples)-1].TS
+			if !latestSampleTS.After(*lastRunAt) {
+				return []DetectorResult{{Hit: false}}, nil
+			}
+		}
 		sigma := param.Detector.Shewhart.SigmaMultiplier
 		if sigma == 0 {
 			sigma = 3
@@ -406,6 +414,13 @@ func (r *Registry) evaluateParameterSince(ctx context.Context, spec RuleSpec, pa
 			return nil, err
 		}
 		samples = filterSamplesByRange(samples, start, end)
+		// Skip evaluation if the latest sample has not changed since the last run.
+		if len(samples) > 0 && lastRunAt != nil {
+			latestSampleTS := samples[len(samples)-1].TS
+			if !latestSampleTS.After(*lastRunAt) {
+				return []DetectorResult{{Hit: false}}, nil
+			}
+		}
 		groups := [][]Sample{}
 		size := param.Detector.RangeChart.SubgroupSize
 		if subgroupColumn != "" {
